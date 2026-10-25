@@ -10,7 +10,10 @@ from array import array
 from urllib.parse import urlencode
 
 import pyaudiowpatch as pyaudio
+from websockets.exceptions import InvalidStatus
 from websockets.sync.client import connect
+
+from .account import explain_http
 
 DEEPGRAM_URL = "wss://api.deepgram.com/v1/listen"
 
@@ -73,11 +76,14 @@ class Source:
             "interim_results": "true",
             "endpointing": 300,
         }
-        self._ws = connect(
-            f"{DEEPGRAM_URL}?{urlencode(params)}",
-            additional_headers={"Authorization": f"Token {self.cfg['deepgram_key']}"},
-            open_timeout=10,
-        )
+        try:
+            self._ws = connect(
+                f"{DEEPGRAM_URL}?{urlencode(params)}",
+                additional_headers={"Authorization": f"Token {self.cfg['deepgram_key'].strip()}"},
+                open_timeout=10,
+            )
+        except InvalidStatus as e:
+            raise RuntimeError(explain_http("Deepgram", e.response.status_code)) from None
         self._stream = self.p.open(
             format=pyaudio.paInt16,
             channels=self.channels,

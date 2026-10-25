@@ -14,7 +14,7 @@ from PySide6.QtWidgets import (
     QPushButton, QSplitter, QTextBrowser, QVBoxLayout, QWidget,
 )
 
-from . import config, llm
+from . import account, config, llm
 from .capture import Recorder, list_microphones
 
 CATCHUP_SECONDS = 5 * 60
@@ -91,10 +91,31 @@ class SettingsDialog(QDialog):
         form.addRow("Микрофон", self.mic)
         form.addRow(self.system)
         form.addRow(self.hint)
+        check = QPushButton("Проверить ключи и баланс")
+        check.clicked.connect(self.check_keys)
+        self.check_result = QLabel("")
+        self.check_result.setObjectName("muted")
+        self.check_result.setWordWrap(True)
+        form.addRow(check)
+        form.addRow(self.check_result)
         buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         form.addRow(buttons)
+
+    def check_keys(self):
+        self.check_result.setText("Проверяю…")
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        QApplication.processEvents()
+        lines = []
+        for fn, key in ((account.check_deepgram, self.dg.text().strip()),
+                        (account.check_openrouter, self.orr.text().strip())):
+            try:
+                lines.append(fn(key))
+            except Exception as e:  # noqa: BLE001
+                lines.append(f"Не удалось проверить: {e}")
+        QApplication.restoreOverrideCursor()
+        self.check_result.setText("\n".join(lines))
 
     def apply(self):
         self.cfg.update(

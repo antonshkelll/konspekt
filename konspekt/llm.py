@@ -3,6 +3,8 @@ import json
 
 import httpx
 
+from .account import explain_http
+
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 SYSTEM = (
@@ -48,6 +50,8 @@ def stream_answer(api_key: str, model: str, messages: list[dict], on_delta, canc
     with httpx.stream("POST", OPENROUTER_URL, headers=headers, json=body, timeout=60) as r:
         if r.status_code != 200:
             r.read()
+            if r.status_code in (401, 402, 403, 429):
+                raise RuntimeError(explain_http("OpenRouter", r.status_code))
             raise RuntimeError(f"OpenRouter {r.status_code}: {r.text[:300]}")
         for line in r.iter_lines():
             if cancel():
