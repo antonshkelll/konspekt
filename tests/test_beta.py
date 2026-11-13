@@ -176,6 +176,22 @@ class WindowTests(unittest.TestCase):
         self.assertFalse(self.win.lines)
         self.assertFalse(self.win.attachments)
 
+    def test_background_answer_reaches_ui_with_attached_context(self):
+        self.win.cfg["deepseek_key"] = "test"
+        self.win.attachments["brief.md"] = "Бюджет 100"
+        def answer(key, model, messages, on_delta, cancel, url, service):
+            self.assertIn("brief.md", messages[1]["content"])
+            self.assertEqual(service, "DeepSeek")
+            on_delta("Готовый ответ")
+        with patch.object(llm, "stream_answer", answer):
+            self.win.run_ai("Каков бюджет?", "", "ignored")
+            deadline = time.monotonic() + 2
+            while self.win._ai_busy and time.monotonic() < deadline:
+                self.app.processEvents()
+                time.sleep(0.01)
+        self.assertFalse(self.win._ai_busy)
+        self.assertIn("Готовый ответ", self.win.ai_view.toPlainText())
+
 
 if __name__ == "__main__":
     unittest.main()

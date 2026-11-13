@@ -5,4 +5,5 @@ __pycache__/
 *.spec
 *.pyc
 build.log
+*.log
 output/
