@@ -7,7 +7,7 @@ from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import QObject, Qt, QTimer, Signal
-from PySide6.QtGui import QIcon
+from PySide6.QtGui import QIcon, QShortcut, QKeySequence
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout,
     QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMessageBox, QPlainTextEdit,
@@ -37,6 +37,9 @@ QPushButton#record:hover { background: #6d6df5; }
 QPushButton#record[active="true"] { background: #e5484d; }
 QLabel#muted { color: #8b8fa0; }
 QLabel#live { color: #ff6b6f; font-weight: 600; }
+QLabel#brand { font-size: 24pt; font-weight: 700; color: #f1f3ff; }
+QLabel#eyebrow { color: #a7a5ff; font-size: 9pt; font-weight: 600; }
+QPushButton#secondary { border-color: #5854b8; color: #cbc9ff; }
 QSplitter::handle { background: #14151a; width: 8px; }
 """
 
@@ -244,10 +247,16 @@ class MainWindow(QMainWindow):
         self._request_started = 0.0
         self._first_delta = False
         self.attachments = {}
+        self.history = []
+        self.focus_window = None
+        self._demo_active = False
+        self.answer_render = QTimer(self)
+        self.answer_render.setSingleShot(True)
+        self.answer_render.timeout.connect(self.render_answer)
 
-        self.setWindowTitle("Konspekt — помощник для встреч")
+        self.setWindowTitle("Konspekt — студия встреч · Demo 2")
         self.setWindowIcon(QIcon(resource("icon.ico")))
-        self.resize(1100, 680)
+        self.resize(1220, 800)
         self._build()
         self.tray = QSystemTrayIcon(self.windowIcon(), self)
         menu = QMenu(self)
@@ -263,12 +272,33 @@ class MainWindow(QMainWindow):
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._tick)
         self.timer.start(250)
+        self.shortcuts = [QShortcut(QKeySequence("Ctrl+Return"), self, activated=self.ask_free),
+                          QShortcut(QKeySequence("Ctrl+Shift+K"), self, activated=self.open_focus),
+                          QShortcut(QKeySequence("Escape"), self, activated=self.cancel_answer)]
 
     # ---------- интерфейс ----------
     def _build(self):
         root = QWidget()
         lay = QVBoxLayout(root)
         lay.setContentsMargins(14, 12, 14, 12)
+        heading = QHBoxLayout()
+        titles = QVBoxLayout()
+        eyebrow = QLabel("PERSONAL WORKSPACE / DEMO")
+        eyebrow.setObjectName("eyebrow")
+        brand = QLabel("Konspekt")
+        brand.setObjectName("brand")
+        titles.addWidget(eyebrow)
+        titles.addWidget(brand)
+        heading.addLayout(titles)
+        heading.addStretch()
+        self.session_badge = QLabel("Локальная LLM  ·  встречи и тренировка")
+        self.session_badge.setObjectName("muted")
+        heading.addWidget(self.session_badge)
+        demo = QPushButton("Посмотреть демо")
+        demo.setObjectName("secondary")
+        demo.clicked.connect(self.load_demo)
+        heading.addWidget(demo)
+        lay.addLayout(heading)
 
         top = QHBoxLayout()
         self.rec_btn = QPushButton("●  Начать запись")
@@ -337,6 +367,12 @@ class MainWindow(QMainWindow):
         self.auto = QCheckBox("Автоподсказки после реплики собеседника")
         self.auto.setToolTip("Ollama / DeepSeek: после короткой паузы. Groq: раз в 30 с. OpenRouter: раз в 15 с. Облачные автозапросы расходуют API-баланс.")
         rl.addWidget(self.auto)
+        practice = QHBoxLayout()
+        for title, preset in (("Подсказка", "assist"), ("Разбор ответа", "coach"), ("Вопрос для тренировки", "practice")):
+            button = QPushButton(title)
+            button.clicked.connect(lambda _=False, k=preset: self.ask_preset(k))
+            practice.addWidget(button)
+        rl.addLayout(practice)
 
         presets = QHBoxLayout()
         for label, key in (("Итоги и задачи", "summary"), ("Что я пропустил?", "catchup"),
@@ -363,6 +399,18 @@ class MainWindow(QMainWindow):
         self.ai_timing = QLabel("Ответ по мере генерации · скорость зависит от выбранной модели")
         self.ai_timing.setObjectName("muted")
         rl.addWidget(self.ai_timing)
+        actions = QHBoxLayout()
+        for title, action in (("Копировать", lambda: QApplication.clipboard().setText(self.answer)),
+                              ("Стоп · Esc", self.cancel_answer),
+                              ("Компактно", self.open_focus)):
+            button = QPushButton(title)
+            button.clicked.connect(action)
+            actions.addWidget(button)
+        rl.addLayout(actions)
+        self.history_picker = QComboBox()
+        self.history_picker.addItem("История ответов этой встречи", None)
+        self.history_picker.activated.connect(self.restore_answer)
+        rl.addWidget(self.history_picker)
 
         split.addWidget(left)
         split.addWidget(right)
@@ -388,6 +436,9 @@ class MainWindow(QMainWindow):
 
     # ---------- запись ----------
     def toggle_record(self):
+        if self._demo_active:
+            QMessageBox.information(self, "Демонстрация", "Сначала нажми «Новая встреча», чтобы начать настоящую запись.")
+            return
         if self.recorder:
             self.stop_record()
             return
@@ -501,6 +552,9 @@ class MainWindow(QMainWindow):
             self.run_ai(q, self.transcript_text(), self.cfg["llm_model"])
 
     def run_ai(self, question: str, transcript: str, model: str, automatic=False):
+        if self._demo_active:
+            self.status.setText("Это демонстрационные данные. Нажми «Новая встреча» для работы с моделью.")
+            return
         try:
             url, key, selected_model, service = llm.connection(self.cfg)
         except ValueError as exc:
@@ -517,10 +571,12 @@ class MainWindow(QMainWindow):
             return
         self.cfg["meeting_context"] = self.context.toPlainText()
         config.save(self.cfg)
-        context = compose_context(self.cfg["meeting_context"], self.attachments, compact=service == "Groq")
-        messages = llm.build_messages(transcript, context, question, compact=service == "Groq")
+        compact = service == "Groq" or (automatic and service == "Ollama")
+        context = compose_context(self.cfg["meeting_context"], self.attachments, compact=compact)
+        messages = llm.build_messages(transcript, context, question, compact=compact)
         if service == "Groq":
             self.status.setText("Groq: последние 2000 символов разговора и фрагменты файлов; всего до 3500 символов контекста.")
+        self.archive_answer()
         self.answer = f"**{question}**\n\n"
         self.ai_view.setMarkdown(self.answer + "…")
         if service != "OpenRouter":
@@ -556,8 +612,8 @@ class MainWindow(QMainWindow):
             self._first_delta = True
             self.ai_timing.setText(f"Первый текст через {time.monotonic() - self._request_started:.1f} с после запроса")
         self.answer += delta
-        self.ai_view.setMarkdown(self.answer)
-        self.ai_view.verticalScrollBar().setValue(self.ai_view.verticalScrollBar().maximum())
+        if not self.answer_render.isActive():
+            self.answer_render.start(50)
 
     def on_ai_done(self, token, error: str):
         if token is not self._ai_token:
@@ -566,7 +622,93 @@ class MainWindow(QMainWindow):
         if error:
             self.auto.setChecked(False)
             self.answer += f"\n\n_Ошибка: {error}_"
-            self.ai_view.setMarkdown(self.answer)
+        self.answer_render.stop()
+        self.render_answer()
+
+    def render_answer(self):
+        self.ai_view.setMarkdown(self.answer)
+        self.ai_view.verticalScrollBar().setValue(self.ai_view.verticalScrollBar().maximum())
+        if self.focus_window and self.focus_window.isVisible():
+            self.focus_view.setMarkdown(self.answer)
+
+    def cancel_answer(self):
+        if not self._ai_busy:
+            return
+        self._ai_token = None
+        self._ai_busy = False
+        self.auto.setChecked(False)
+        self.answer_render.stop()
+        self.render_answer()
+        self.ai_timing.setText("Ответ остановлен · сервер может завершать уже принятый запрос")
+
+    def archive_answer(self):
+        if not self.answer.strip():
+            return
+        self.history.insert(0, self.answer)
+        self.history = self.history[:20]
+        self.history_picker.clear()
+        self.history_picker.addItem("История ответов этой встречи", None)
+        for index, value in enumerate(self.history):
+            self.history_picker.addItem(value.splitlines()[0].strip("* ")[:65], index)
+
+    def restore_answer(self, index):
+        selected = self.history_picker.itemData(index)
+        if selected is None:
+            return
+        if self._ai_busy:
+            self.cancel_answer()
+        # The current answer stays recoverable when navigating history.
+        current = self.answer
+        self.answer = self.history[selected]
+        self.history[selected] = current
+        self.history_picker.setItemText(index, current.splitlines()[0].strip("* ")[:65])
+        self.render_answer()
+
+    def open_focus(self):
+        if self.focus_window is None:
+            self.focus_window = QDialog(self)
+            self.focus_window.setWindowTitle("Konspekt · фокус")
+            self.focus_window.resize(480, 560)
+            layout = QVBoxLayout(self.focus_window)
+            layout.addWidget(QLabel("ПОДСКАЗКА / Ctrl+Shift+K"))
+            self.focus_view = QTextBrowser()
+            layout.addWidget(self.focus_view)
+            pin = QCheckBox("Поверх остальных окон")
+            pin.toggled.connect(self.pin_focus)
+            layout.addWidget(pin)
+        self.focus_view.setMarkdown(self.answer or "Подсказка появится здесь после запроса.")
+        self.focus_window.show()
+        protect_window(int(self.focus_window.winId()), self.cfg["capture_protection"])
+        self.focus_window.raise_()
+
+    def pin_focus(self, enabled):
+        self.focus_window.setWindowFlag(Qt.WindowStaysOnTopHint, enabled)
+        self.focus_window.show()
+        protect_window(int(self.focus_window.winId()), self.cfg["capture_protection"])
+
+    def load_demo(self):
+        if self.recorder or self.lines or self._ai_busy or self.answer.strip():
+            self.status.setText("Демо доступно в пустой встрече. Сохрани заметки и нажми «Новая встреча».")
+            return
+        if self.attachments:
+            self.status.setText("Перед демонстрацией убери прикреплённые личные файлы.")
+            return
+        self._demo_previous_context = self.context.toPlainText()
+        self._demo_active = True
+        self.auto.setChecked(False)
+        self.session_badge.setText("ДЕМОНСТРАЦИЯ · вымышленные данные")
+        self.context.setPlainText("Тренировка продуктового интервью. Пилот: две недели. Бюджет: 42 000 ₽.")
+        self.attachments["Демо-бриф.md"] = "Пилот длится две недели. Бюджет 42000 рублей. Цель — сократить время подготовки заметок."
+        self.files_label.setText("Демо-бриф.md · демонстрационный контекст")
+        self.on_text(self._record_generation, "Собеседники", "Как проверим, что пилот принёс пользу?", True)
+        self.on_text(self._record_generation, "Я", "Предлагаю сравнить время подготовки заметок до и после пилота.", True)
+        self.answer = ("**Пример подсказки · заранее подготовленное демо**\n\n"
+                       "Предлагаю измерить время подготовки заметок до пилота и после него.\n\n"
+                       "- **Срок:** две недели.\n- **Бюджет:** 42 000 ₽.\n"
+                       "- **Критерий успеха:** согласуем целевое сокращение времени.\n\n"
+                       "Источник: Демо-бриф.md.\n\n**Уточни:** какой результат команда считает достаточным?")
+        self.render_answer()
+        self.ai_timing.setText("Демо без записи и запросов к API · время генерации не измеряется")
 
     # ---------- прочее ----------
     def open_settings(self):
@@ -629,7 +771,7 @@ class MainWindow(QMainWindow):
         self.status.setText(f"Сохранено: {path}")
 
     def new_meeting(self):
-        if self.lines and QMessageBox.question(
+        if (self.lines or self.answer or self.history) and QMessageBox.question(
                 self, "Новая встреча", "Очистить расшифровку? Несохранённые заметки пропадут."
         ) != QMessageBox.Yes:
             return
@@ -638,6 +780,16 @@ class MainWindow(QMainWindow):
         self.lines.clear()
         self.interim.clear()
         self.answer = ""
+        self.answer_render.stop()
+        self.history.clear()
+        self.history_picker.clear()
+        self.history_picker.addItem("История ответов этой встречи", None)
+        if self._demo_active:
+            self.context.setPlainText(self._demo_previous_context)
+        self._demo_active = False
+        self.session_badge.setText("Локальная LLM  ·  встречи и тренировка")
+        if self.focus_window:
+            self.focus_view.clear()
         self._ai_token = None
         self._ai_busy = False
         self._record_generation += 1
@@ -655,7 +807,7 @@ class MainWindow(QMainWindow):
         self._ai_token = None
         if self.recorder:
             self.recorder.close()
-        self.cfg["meeting_context"] = self.context.toPlainText()
+        self.cfg["meeting_context"] = self._demo_previous_context if self._demo_active else self.context.toPlainText()
         config.save(self.cfg)
         super().closeEvent(event)
 

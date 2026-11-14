@@ -221,6 +221,48 @@ class WindowTests(unittest.TestCase):
         self.assertFalse(self.win._ai_busy)
         self.assertIn("Готовый ответ", self.win.ai_view.toPlainText())
 
+    def test_demo_never_calls_llm_and_preserves_real_context(self):
+        self.win.context.setPlainText("Моя повестка")
+        self.win.load_demo()
+        self.assertTrue(self.win._demo_active)
+        with patch.object(llm, "stream_answer") as request:
+            self.win.run_ai("вопрос", "", "model")
+            request.assert_not_called()
+        self.assertIsNone(self.win.recorder)
+        with patch.object(QMessageBox, "question", return_value=QMessageBox.Yes):
+            self.win.new_meeting()
+        self.assertEqual(self.win.context.toPlainText(), "Моя повестка")
+        self.assertFalse(self.win.attachments)
+        self.assertFalse(self.win._demo_active)
+
+    def test_demo_close_does_not_persist_demo_context(self):
+        self.win.context.setPlainText("Личная повестка")
+        self.win.load_demo()
+        self.win.close()
+        self.assertEqual(self.win.cfg["meeting_context"], "Личная повестка")
+
+    def test_cancel_rejects_queued_answer_and_flushes_text(self):
+        token = self.win._ai_token = object()
+        self.win._ai_busy = True
+        self.win.on_ai_delta(token, "Первый текст")
+        self.win.cancel_answer()
+        self.win.on_ai_delta(token, "не должен появиться")
+        self.assertEqual(self.win.answer, "Первый текст")
+        self.assertIn("Первый текст", self.win.ai_view.toPlainText())
+        self.assertFalse(self.win._ai_busy)
+
+    def test_history_swap_and_compact_view(self):
+        self.win.answer = "Первый ответ"
+        self.win.archive_answer()
+        self.win.answer = "Второй ответ"
+        self.win.restore_answer(1)
+        self.assertEqual(self.win.answer, "Первый ответ")
+        self.assertEqual(self.win.history[0], "Второй ответ")
+        self.win.open_focus()
+        self.win.render_answer()
+        self.assertEqual(self.win.focus_view.toPlainText(), "Первый ответ")
+        self.win.focus_window.close()
+
 
 if __name__ == "__main__":
     unittest.main()
