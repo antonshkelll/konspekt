@@ -1,0 +1,4 @@
+* text=auto eol=lf
+siwc/THIRD_PARTY_NOTICES.md whitespace=-blank-at-eol
+*.bat text eol=crlf
+*.spec text eol=lf

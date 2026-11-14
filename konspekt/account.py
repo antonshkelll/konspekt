@@ -12,10 +12,22 @@ def explain_http(service: str, code: int) -> str:
                 "при создании), а не его ID.") if service == "Deepgram" else ""
         return f"{service} не принял ключ.{hint}"
     if code == 402:
-        return f"На балансе {service} закончились деньги — новые запросы не проходят, сверх баланса ничего не спишется."
+        return f"{service}: недостаточно средств на API-балансе (HTTP 402). Проверь баланс в кабинете провайдера."
     if code == 429:
         return f"{service}: слишком много запросов, подожди немного."
     return f"{service} ответил ошибкой {code}."
+
+
+def check_deepseek(key: str) -> str:
+    if not key:
+        return "DeepSeek: ключ не указан."
+    r = httpx.get("https://api.deepseek.com/user/balance",
+                  headers={"Authorization": f"Bearer {key}"}, timeout=10)
+    if r.status_code != 200:
+        return explain_http("DeepSeek", r.status_code)
+    if not r.json().get("is_available", False):
+        return "DeepSeek: ключ работает, но средств для API-запросов недостаточно. Проверь баланс."
+    return "DeepSeek: ключ работает, баланс доступен для API-запросов."
 
 
 def check_deepgram(key: str) -> str:

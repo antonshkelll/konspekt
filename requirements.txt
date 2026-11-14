@@ -1,6 +1,7 @@
-PySide6>=6.7
+PySide6-Essentials>=6.7
 PyAudioWPatch>=0.2.12
-websockets>=13
+websockets>=15
 httpx>=0.27
 pillow>=10
 pyinstaller>=6.6
+pypdf>=5

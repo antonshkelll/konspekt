@@ -14,6 +14,7 @@ from websockets.exceptions import InvalidStatus
 from websockets.sync.client import connect
 
 from .account import explain_http
+from .groq_stt import GroqSource
 
 DEEPGRAM_URL = "wss://api.deepgram.com/v1/listen"
 
@@ -80,6 +81,7 @@ class Source:
             self._ws = connect(
                 f"{DEEPGRAM_URL}?{urlencode(params)}",
                 additional_headers={"Authorization": f"Token {self.cfg['deepgram_key'].strip()}"},
+                proxy=True if self.cfg.get("deepgram_use_proxy", False) else None,
                 open_timeout=10,
             )
         except InvalidStatus as e:
@@ -172,7 +174,8 @@ class Recorder:
                 self.on_status("Не нашёл системный звук — пишу только микрофон")
         try:
             for dev, who in devices:
-                src = Source(self.p, dev, who, self.cfg, self.on_text, self.on_status)
+                factory = GroqSource if self.cfg.get("stt_provider") == "groq" else Source
+                src = factory(self.p, dev, who, self.cfg, self.on_text, self.on_status)
                 self.sources.append(src)
                 src.start()
         except Exception:

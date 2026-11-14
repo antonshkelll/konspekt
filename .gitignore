@@ -3,5 +3,11 @@ build/
 dist/
 __pycache__/
 *.spec
+!Konspekt.spec
 *.pyc
 build.log
+*.log
+output/
+siwc/node_modules/
+siwc/node.exe
+siwc/node-bin/
