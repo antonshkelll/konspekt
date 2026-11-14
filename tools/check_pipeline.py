@@ -40,8 +40,8 @@ transcript = " ".join(parts)
 if not transcript:
     raise RuntimeError("No synthetic speech recognized")
 print(f"STT PASS in {time.monotonic()-started:.2f}s: {transcript}", flush=True)
-model = sys.argv[1] if len(sys.argv) > 1 else cfg["ollama_model"]
-cfg.update(llm_provider="ollama", ollama_model=model)
+if len(sys.argv) > 1:
+    cfg.update(llm_provider="ollama", ollama_model=sys.argv[1])
 url, key, model, service = llm.connection(cfg)
 started = time.monotonic()
 first = []
@@ -54,4 +54,4 @@ def delta(text):
 messages = llm.build_messages(transcript, "Файл: synthetic-brief.md\nБюджет 42000 рублей, срок 2 недели.",
                               "Назови бюджет и срок из разговора. Ответь одним предложением.")
 llm.stream_answer(key, model, messages, delta, lambda: False, url, service, max_tokens=100)
-print(f"Pipeline PASS; model={model}; LLM total={time.monotonic()-started:.2f}s; answer={''.join(answer)}", flush=True)
+print(f"Pipeline PASS; service={service}; model={model}; LLM total={time.monotonic()-started:.2f}s; answer={''.join(answer)}", flush=True)

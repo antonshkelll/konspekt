@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (
     QSystemTrayIcon, QMenu, QScrollArea, QSlider,
 )
 
-from . import account, config, llm
+from . import account, config, llm, diagnostics
 from .capture import Recorder, list_microphones
 from .context import read_context, compose_context
 from .privacy import protect_window
@@ -58,6 +58,8 @@ class Bridge(QObject):
 
 
 class SettingsDialog(QDialog):
+    checked = Signal(str)
+    check_finished = Signal()
     def __init__(self, cfg: dict, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Настройки")
@@ -75,7 +77,7 @@ class SettingsDialog(QDialog):
         outer.addWidget(area)
 
         self.provider = QComboBox()
-        for label, value in (("DeepSeek · быстрый ответ, платный API", "deepseek"), ("Groq · бесплатная квота", "groq"), ("Ollama · своя модель", "ollama"), ("OpenRouter", "openrouter")):
+        for label, value in (("OpenAI API · отдельный API-баланс", "openai"), ("DeepSeek · платный API", "deepseek"), ("Groq · бесплатная квота", "groq"), ("Ollama · своя модель", "ollama"), ("OpenRouter", "openrouter")):
             self.provider.addItem(label, value)
         self.provider.setCurrentIndex(max(0, self.provider.findData(cfg["llm_provider"])))
         self.stt_provider = QComboBox()
@@ -85,6 +87,9 @@ class SettingsDialog(QDialog):
         self.groq = QLineEdit(cfg["groq_key"])
         self.groq.setEchoMode(QLineEdit.Password)
         self.groq_model = QLineEdit(cfg["groq_model"])
+        self.openai = QLineEdit(cfg["openai_key"])
+        self.openai.setEchoMode(QLineEdit.Password)
+        self.openai_model = QLineEdit(cfg["openai_model"])
         self.deepseek = QLineEdit(cfg["deepseek_key"])
         self.deepseek.setEchoMode(QLineEdit.Password)
         self.deepseek_model = QLineEdit(cfg["deepseek_model"])
@@ -96,6 +101,8 @@ class SettingsDialog(QDialog):
         self.taskbar.setChecked(cfg["skip_taskbar"])
         form.addRow("Провайдер ответов", self.provider)
         form.addRow("Распознавание речи", self.stt_provider)
+        form.addRow("Ключ OpenAI API", self.openai)
+        form.addRow("Модель OpenAI", self.openai_model)
         form.addRow("Ключ DeepSeek", self.deepseek)
         form.addRow("Модель DeepSeek", self.deepseek_model)
         form.addRow("Ключ Groq", self.groq)
@@ -145,13 +152,21 @@ class SettingsDialog(QDialog):
         note = QLabel("Речь отправляется провайдеру распознавания, контекст — провайдеру ответов.\nЗащиту окна проверь в своей программе созвонов.\nКлючи сохраняются локально в config.json; не публикуй его.")
         note.setWordWrap(True)
         form.addRow(note)
-        check = QPushButton("Проверить API")
+        check = QPushButton("Проверить подключение")
         check.clicked.connect(self.check_keys)
         self.check_result = QLabel("")
         self.check_result.setObjectName("muted")
         self.check_result.setWordWrap(True)
         form.addRow(check)
+        self.live_check = QPushButton("Проверить ответ и скорость · тестовый API-запрос")
+        self.live_check.clicked.connect(lambda: self.check_keys(live=True))
+        form.addRow(self.live_check)
         form.addRow(self.check_result)
+        self.checked.connect(self.check_result.setText)
+        self.check_finished.connect(lambda: (check.setEnabled(True), self.live_check.setEnabled(True)))
+        self.check_finished.connect(lambda: setattr(self, "_checking", False))
+        self._checking = False
+        self._check_button = check
         buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
@@ -159,6 +174,7 @@ class SettingsDialog(QDialog):
         def refresh_fields():
             selected = self.provider.currentData()
             for field, provider in ((self.deepseek, "deepseek"), (self.deepseek_model, "deepseek"),
+                                    (self.openai, "openai"), (self.openai_model, "openai"),
                                     (self.groq, "groq"), (self.groq_model, "groq"),
                                     (self.ollama_url, "ollama"), (self.ollama_model, "ollama"),
                                     (self.orr, "openrouter"), (self.model, "openrouter"), (self.fast, "openrouter")):
@@ -169,40 +185,47 @@ class SettingsDialog(QDialog):
         self.stt_provider.currentIndexChanged.connect(refresh_fields)
         refresh_fields()
 
-    def check_keys(self):
-        self.check_result.setText("Проверяю…")
-        QApplication.setOverrideCursor(Qt.WaitCursor)
-        QApplication.processEvents()
-        lines = []
-        try:
-            import httpx
-            snapshot = dict(self.cfg, llm_provider=self.provider.currentData(),
-                            groq_key=self.groq.text().strip(), groq_model=self.groq_model.text().strip(),
-                            deepseek_key=self.deepseek.text().strip(), deepseek_model=self.deepseek_model.text().strip(),
-                            ollama_url=self.ollama_url.text().strip(), ollama_model=self.ollama_model.text().strip(),
-                            openrouter_key=self.orr.text().strip())
-            url, key, _, service = llm.connection(snapshot)
-            r = httpx.get(url + "/models", headers={"Authorization": f"Bearer {key}"} if key else {}, timeout=10)
-            lines.append(f"{service}: API доступен; генерацию ещё нужно проверить." if r.status_code == 200 else account.explain_http(service, r.status_code))
-        except Exception:
-            lines.append("API ответов недоступен: проверь адрес и соединение.")
-        checks = []
-        if self.provider.currentData() == "deepseek":
-            checks.append((account.check_deepseek, self.deepseek.text().strip()))
-        if self.stt_provider.currentData() == "deepgram":
-            checks.append((account.check_deepgram, self.dg.text().strip()))
-        if self.provider.currentData() == "openrouter":
-            checks.append((account.check_openrouter, self.orr.text().strip()))
-        for fn, key in checks:
+    def check_keys(self, live=False):
+        if self._checking:
+            return
+        self._checking = True
+        self._check_button.setEnabled(False)
+        self.live_check.setEnabled(False)
+        self.check_result.setText("Проверяю в фоне…" if not live else "Отправляю синтетический тест. Для платного API запрос тарифицируется…")
+        snapshot = dict(self.cfg, llm_provider=self.provider.currentData(),
+                        openai_key=self.openai.text().strip(), openai_model=self.openai_model.text().strip(),
+                        groq_key=self.groq.text().strip(), groq_model=self.groq_model.text().strip(),
+                        deepseek_key=self.deepseek.text().strip(), deepseek_model=self.deepseek_model.text().strip(),
+                        ollama_url=self.ollama_url.text().strip(), ollama_model=self.ollama_model.text().strip(),
+                        openrouter_key=self.orr.text().strip(), llm_model=self.model.text().strip(),
+                        stt_provider=self.stt_provider.currentData(), deepgram_key=self.dg.text().strip())
+        def work():
+            lines = []
             try:
-                lines.append(fn(key))
-            except Exception as e:  # noqa: BLE001
-                lines.append(f"Не удалось проверить: {e}")
-        QApplication.restoreOverrideCursor()
-        self.check_result.setText("\n".join(lines))
+                if live:
+                    lines.append(diagnostics.probe(snapshot)["message"])
+                else:
+                    import httpx
+                    url, key, _, service = llm.connection(snapshot)
+                    if service != "Ollama" and not key:
+                        lines.append(f"{service}: укажи API-ключ.")
+                    else:
+                        r = httpx.get(url + "/models", headers={"Authorization": f"Bearer {key}"} if key else {}, timeout=10)
+                        lines.append(f"{service}: API доступен. Нажми проверку ответа для проверки генерации и квоты." if r.status_code == 200 else account.explain_http(service, r.status_code))
+                if snapshot["stt_provider"] == "deepgram":
+                    lines.append(account.check_deepgram(snapshot["deepgram_key"]))
+            except Exception as exc:
+                lines.append(f"Проверка не завершена: {type(exc).__name__}. Проверь сеть, ключ и модель.")
+            try:
+                self.checked.emit("\n".join(lines))
+                self.check_finished.emit()
+            except RuntimeError:
+                pass  # Dialog was closed while the network request was in progress.
+        threading.Thread(target=work, daemon=True).start()
 
     def apply(self):
         self.cfg.update(
+            openai_key=self.openai.text().strip(), openai_model=self.openai_model.text().strip() or config.DEFAULTS["openai_model"],
             llm_provider=self.provider.currentData(), stt_provider=self.stt_provider.currentData(),
             deepseek_key=self.deepseek.text().strip(), deepseek_model=self.deepseek_model.text().strip() or config.DEFAULTS["deepseek_model"],
             groq_key=self.groq.text().strip(), groq_model=self.groq_model.text().strip() or config.DEFAULTS["groq_model"],
@@ -285,7 +308,7 @@ class MainWindow(QMainWindow):
         self.answer_render.setSingleShot(True)
         self.answer_render.timeout.connect(self.render_answer)
 
-        self.setWindowTitle("Konspekt — студия встреч · Demo 2")
+        self.setWindowTitle("Konspekt — персональный помощник")
         self.setWindowIcon(QIcon(resource("icon.ico")))
         self.resize(1220, 800)
         self._build()
@@ -322,7 +345,7 @@ class MainWindow(QMainWindow):
         titles.addWidget(brand)
         heading.addLayout(titles)
         heading.addStretch()
-        self.session_badge = QLabel("Локальная LLM  ·  встречи и тренировка")
+        self.session_badge = QLabel(self.profile_caption())
         self.session_badge.setObjectName("muted")
         heading.addWidget(self.session_badge)
         demo = QPushButton("Посмотреть демо")
@@ -396,7 +419,7 @@ class MainWindow(QMainWindow):
         self.files_label.setWordWrap(True)
         rl.addWidget(self.files_label)
         self.auto = QCheckBox("Автоподсказки после реплики собеседника")
-        self.auto.setToolTip("Ollama / DeepSeek: после короткой паузы. Groq: раз в 30 с. OpenRouter: раз в 15 с. Облачные автозапросы расходуют API-баланс.")
+        self.auto.setToolTip("OpenAI / Ollama / DeepSeek: после короткой паузы. Groq: раз в 30 с. OpenRouter: раз в 15 с. Облачные автозапросы расходуют API-баланс.")
         rl.addWidget(self.auto)
         practice = QHBoxLayout()
         for title, preset in (("Подсказка", "assist"), ("Разбор ответа", "coach"), ("Вопрос для тренировки", "practice")):
@@ -454,11 +477,11 @@ class MainWindow(QMainWindow):
             sec = int(time.time() - self.started_at)
             self.clock.setText(f"{sec // 60:02d}:{sec % 60:02d}")
             now = time.monotonic()
-            interval = {"deepseek": 1, "ollama": 1, "groq": 30}.get(self.cfg["llm_provider"], 15)
+            interval = {"openai": 1, "deepseek": 1, "ollama": 1, "groq": 30}.get(self.cfg["llm_provider"], 15)
             if (self.auto.isChecked() and not self._ai_busy and self.lines and self._auto_pending
                     and now >= self._manual_until and not self.interim
                     and now - self._last_auto >= interval
-                    and now - self._last_final >= (0.35 if self.cfg["llm_provider"] in ("deepseek", "ollama") else 1.5)):
+                    and now - self._last_final >= (0.35 if self.cfg["llm_provider"] in ("openai", "deepseek", "ollama") else 1.5)):
                 batch = self._auto_buffer[:1800]
                 boundary = batch.rfind("\n")
                 if boundary >= 600:
@@ -790,7 +813,15 @@ class MainWindow(QMainWindow):
         dlg = SettingsDialog(self.cfg, self)
         if dlg.exec():
             dlg.apply()
+            self.session_badge.setText(self.profile_caption())
             self.apply_privacy()
+
+    def profile_caption(self):
+        try:
+            _, key, model, service = llm.connection(self.cfg)
+            return f"{service} · {model}" if key or service == "Ollama" else f"{service} · нужен API-ключ"
+        except ValueError:
+            return "Выбери провайдера в настройках"
 
     def attach_files(self):
         paths, _ = QFileDialog.getOpenFileNames(self, "Контекст для ИИ", "", "Документы (*.txt *.md *.csv *.docx *.pdf)")
@@ -862,7 +893,7 @@ class MainWindow(QMainWindow):
         if self._demo_active:
             self.context.setPlainText(self._demo_previous_context)
         self._demo_active = False
-        self.session_badge.setText("Локальная LLM  ·  встречи и тренировка")
+        self.session_badge.setText(self.profile_caption())
         if self.focus_window:
             self.focus_view.clear()
         self._ai_token = None

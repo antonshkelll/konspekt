@@ -13,9 +13,9 @@ from zipfile import ZipFile
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import httpx
 from PySide6.QtWidgets import QApplication, QMessageBox
-from konspekt import account, config, llm
+from konspekt import account, config, llm, diagnostics
 from konspekt.context import read_context, compose_context
-from konspekt.app import MainWindow
+from konspekt.app import MainWindow, SettingsDialog
 from konspekt.groq_stt import GroqSource
 from konspekt.capture import Source
 from unittest.mock import MagicMock
@@ -90,6 +90,46 @@ class ContextTests(unittest.TestCase):
 
 
 class LLMTests(unittest.TestCase):
+    def test_openai_stream_wire_contract(self):
+        cfg = dict(config.DEFAULTS, llm_provider="openai", openai_key="synthetic-key")
+        url, key, model, service = llm.connection(cfg)
+        self.assertEqual(url, "https://api.openai.com/v1")
+        self.assertEqual(model, "gpt-6-luna")
+        with patch.object(llm.httpx, "stream") as stream:
+            response = stream.return_value.__enter__.return_value
+            response.status_code = 200
+            response.iter_lines.return_value = ['data: {"choices":[{"delta":{"content":"готово"}}]}', 'data: [DONE]']
+            out = []
+            llm.stream_answer(key, model, [], out.append, lambda: False, url, service, max_tokens=120)
+            body = stream.call_args.kwargs["json"]
+            self.assertEqual(body["max_completion_tokens"], 120)
+            self.assertNotIn("max_tokens", body)
+            self.assertEqual(body["reasoning_effort"], "none")
+            self.assertFalse(body["store"])
+            self.assertEqual(out, ["готово"])
+
+    def test_probe_requires_key_and_redacts_failures(self):
+        cfg = dict(config.DEFAULTS, llm_provider="openai", openai_key="")
+        with patch.object(llm, "stream_answer") as request:
+            self.assertFalse(diagnostics.probe(cfg)["ok"])
+            request.assert_not_called()
+        cfg["openai_key"] = "secret-test-key"
+        with patch.object(llm, "stream_answer", side_effect=RuntimeError("error secret-test-key")):
+            report = diagnostics.probe(cfg)
+        self.assertFalse(report["ok"])
+        self.assertNotIn("secret-test-key", report["message"])
+
+    def test_probe_measures_real_callback(self):
+        cfg = dict(config.DEFAULTS, llm_provider="openai", openai_key="test")
+        def respond(key, model, messages, delta, cancel, url, service, **kwargs):
+            self.assertNotIn("Расшифровка", messages[1]["content"])
+            delta("42000 рублей, 2 недели")
+        with patch.object(llm, "stream_answer", respond):
+            report = diagnostics.probe(cfg)
+        self.assertTrue(report["ok"])
+        self.assertGreaterEqual(report["first_text_s"], 0)
+        self.assertGreaterEqual(report["total_s"], report["first_text_s"])
+
     def test_deepseek_empty_balance_is_not_reported_as_ready(self):
         with patch.object(account.httpx, "get", return_value=httpx.Response(200, json={"is_available": False})):
             result = account.check_deepseek("test")
@@ -297,6 +337,24 @@ class WindowTests(unittest.TestCase):
         self.assertAlmostEqual(self.win.focus_window.grab().toImage().pixelColor(5,100).alpha(), 204, delta=2)
         self.assertIn("color: white", self.win.focus_window.styleSheet())
         self.win.focus_window.close()
+
+    def test_openai_settings_and_background_probe(self):
+        with patch("konspekt.app.Recorder"), patch("konspekt.app.list_microphones", return_value=[]):
+            dlg = SettingsDialog(dict(config.DEFAULTS))
+        dlg.provider.setCurrentIndex(dlg.provider.findData("openai"))
+        dlg.openai.setText("test-key")
+        with patch.object(diagnostics, "probe", return_value={"ok": True, "message": "Synthetic PASS"}), patch.object(account, "check_deepgram", return_value="STT"):
+            dlg.check_keys(live=True)
+            deadline = time.monotonic() + 2
+            while dlg._checking and time.monotonic() < deadline:
+                self.app.processEvents()
+                time.sleep(0.01)
+        self.assertFalse(dlg._checking)
+        self.assertIn("Synthetic PASS", dlg.check_result.text())
+        dlg.apply()
+        self.assertEqual(dlg.cfg["llm_provider"], "openai")
+        self.assertEqual(dlg.cfg["openai_key"], "test-key")
+        dlg.close()
 
 
 if __name__ == "__main__":

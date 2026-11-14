@@ -9,6 +9,8 @@ NOTES_DIR = Path.home() / "Documents" / "Konspekt"
 
 DEFAULTS = {
     "overlay_alpha": 25,
+    "openai_key": "",
+    "openai_model": "gpt-6-luna",
     "deepgram_key": "",
     "openrouter_key": "",
     "groq_key": "",

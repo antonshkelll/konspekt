@@ -11,6 +11,8 @@ OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 def connection(cfg: dict) -> tuple[str, str, str, str]:
     provider = cfg["llm_provider"]
+    if provider == "openai":
+        return "https://api.openai.com/v1", cfg["openai_key"], cfg["openai_model"], "OpenAI"
     if provider == "deepseek":
         return "https://api.deepseek.com", cfg["deepseek_key"], cfg["deepseek_model"], "DeepSeek"
     if provider == "groq":
@@ -23,7 +25,9 @@ def connection(cfg: dict) -> tuple[str, str, str, str]:
         if parsed.scheme == "http" and parsed.hostname not in ("localhost", "127.0.0.1", "::1"):
             raise ValueError("Для удалённого Ollama используй HTTPS или локальный SSH-туннель.")
         return url, "", cfg["ollama_model"], "Ollama"
-    return "https://openrouter.ai/api/v1", cfg["openrouter_key"], cfg["llm_model"], "OpenRouter"
+    if provider == "openrouter":
+        return "https://openrouter.ai/api/v1", cfg["openrouter_key"], cfg["llm_model"], "OpenRouter"
+    raise ValueError("Неизвестный провайдер ответов. Выбери провайдера в настройках.")
 
 SYSTEM = (
     "Ты помощник для рабочих встреч. Тебе дают расшифровку разговора: реплики «Я» — "
@@ -73,7 +77,14 @@ def stream_answer(api_key: str, model: str, messages: list[dict], on_delta, canc
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
     body = {"model": model, "messages": messages, "stream": True, "max_tokens": max_tokens}
-    if service == "DeepSeek":
+    if service == "OpenAI":
+        body["max_completion_tokens"] = body.pop("max_tokens")
+        body["reasoning_effort"] = "none"
+        body["store"] = False
+    elif service == "Groq" and "gpt-oss" in model:
+        body["reasoning_effort"] = "low"
+        body["max_completion_tokens"] = max(body.pop("max_tokens"), 1024)
+    elif service == "DeepSeek":
         body["thinking"] = {"type": "disabled"}
     elif service == "Ollama":
         body["reasoning_effort"] = "none"
