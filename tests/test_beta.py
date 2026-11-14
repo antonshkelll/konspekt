@@ -263,6 +263,41 @@ class WindowTests(unittest.TestCase):
         self.assertEqual(self.win.focus_view.toPlainText(), "Первый ответ")
         self.win.focus_window.close()
 
+    def test_both_speakers_are_sent_and_backlog_is_not_dropped(self):
+        self.win.recorder = object()
+        self.win.auto.setChecked(True)
+        self.win.on_text(0, "Я", "мой ответ " * 300, True)
+        self.win.on_text(0, "Собеседники", "следующий вопрос?", True)
+        expected = self.win._auto_buffer
+        self.win._last_final = time.monotonic() - 5
+        self.win._ai_busy = True
+        with patch.object(self.win, "run_ai") as ask:
+            self.win._tick()
+            ask.assert_not_called()
+            self.assertEqual(self.win._auto_buffer, expected)
+            self.win._ai_busy = False
+            while self.win._auto_pending:
+                self.win._last_auto = 0
+                self.win._tick()
+            sent = "".join(call.args[1] for call in ask.call_args_list)
+        self.assertEqual(sent, expected)
+        self.assertIn("Я:", sent)
+        self.assertIn("Собеседники:", sent)
+
+    def test_overlay_alpha_does_not_fade_text(self):
+        self.win.open_focus()
+        self.win.set_overlay_alpha(15)
+        self.assertEqual(self.win.cfg["overlay_alpha"], 15)
+        self.assertEqual(self.win.focus_window.windowOpacity(), 1.0)
+        self.app.processEvents()
+        image = self.win.focus_window.grab().toImage()
+        self.assertAlmostEqual(image.pixelColor(5, 100).alpha(), 38, delta=2)
+        self.win.set_overlay_alpha(80)
+        self.app.processEvents()
+        self.assertAlmostEqual(self.win.focus_window.grab().toImage().pixelColor(5,100).alpha(), 204, delta=2)
+        self.assertIn("color: white", self.win.focus_window.styleSheet())
+        self.win.focus_window.close()
+
 
 if __name__ == "__main__":
     unittest.main()

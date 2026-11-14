@@ -7,12 +7,12 @@ from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import QObject, Qt, QTimer, Signal
-from PySide6.QtGui import QIcon, QShortcut, QKeySequence
+from PySide6.QtGui import QIcon, QShortcut, QKeySequence, QPainter, QColor, QPen
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout,
     QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMessageBox, QPlainTextEdit,
     QPushButton, QSplitter, QTextBrowser, QVBoxLayout, QWidget, QFileDialog,
-    QSystemTrayIcon, QMenu, QScrollArea,
+    QSystemTrayIcon, QMenu, QScrollArea, QSlider,
 )
 
 from . import account, config, llm
@@ -221,6 +221,36 @@ class SettingsDialog(QDialog):
         config.save(self.cfg)
 
 
+class FocusWindow(QDialog):
+    """Clear text over a translucent background; drag the header to move."""
+    def __init__(self, parent):
+        super().__init__(parent, Qt.Tool | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        self._drag_offset = None
+        self.background_alpha = 64
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setBrush(QColor(14, 16, 24, self.background_alpha))
+        painter.setPen(QPen(QColor(170, 170, 210, 90), 1))
+        painter.drawRoundedRect(self.rect().adjusted(1, 1, -1, -1), 12, 12)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton and event.position().y() < 55:
+            self._drag_offset = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._drag_offset is not None and event.buttons() & Qt.LeftButton:
+            self.move(event.globalPosition().toPoint() - self._drag_offset)
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        self._drag_offset = None
+        super().mouseReleaseEvent(event)
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -243,6 +273,7 @@ class MainWindow(QMainWindow):
         self._last_auto_line = 0
         self._last_final = 0.0
         self._auto_pending = False
+        self._auto_buffer = ""
         self._manual_until = 0.0
         self._request_started = 0.0
         self._first_delta = False
@@ -426,13 +457,19 @@ class MainWindow(QMainWindow):
             interval = {"deepseek": 1, "ollama": 1, "groq": 30}.get(self.cfg["llm_provider"], 15)
             if (self.auto.isChecked() and not self._ai_busy and self.lines and self._auto_pending
                     and now >= self._manual_until and not self.interim
-                    and len(self.lines) > self._last_auto_line
                     and now - self._last_auto >= interval
                     and now - self._last_final >= (0.35 if self.cfg["llm_provider"] in ("deepseek", "ollama") else 1.5)):
-                self._auto_pending = False
+                batch = self._auto_buffer[:1800]
+                boundary = batch.rfind("\n")
+                if boundary >= 600:
+                    batch = batch[:boundary + 1]
+                self._auto_buffer = self._auto_buffer[len(batch):]
+                self._auto_pending = bool(self._auto_buffer)
                 self._last_auto = now
                 self._last_auto_line = len(self.lines)
-                self.run_ai(llm.PRESETS["assist"], self.transcript_text(), self.cfg["fast_model"], automatic=True)
+                self.run_ai(llm.PRESETS["assist"], batch, self.cfg["fast_model"], automatic=True)
+        if self.focus_window and self.focus_window.isVisible():
+            self.focus_state.setText("● Микрофон + системный звук · автоответы" if self.recorder else "Запись выключена")
 
     # ---------- запись ----------
     def toggle_record(self):
@@ -475,6 +512,8 @@ class MainWindow(QMainWindow):
         self.rec_btn.style().polish(self.rec_btn)
         self.live.setText("● Идёт расшифровка")
         self.tray.setToolTip("Konspekt · ● идёт запись")
+        self.auto.setChecked(True)
+        self.open_focus()
         self.status.setText("")
 
     def stop_record(self):
@@ -497,8 +536,8 @@ class MainWindow(QMainWindow):
             self.interim.pop(speaker, None)
             self.lines.append((time.time(), speaker, text))
             self._last_final = time.monotonic()
-            if speaker == "Собеседники":
-                self._auto_pending = True
+            self._auto_buffer += f"{speaker}: {text}\n"
+            self._auto_pending = True
         else:
             self.interim[speaker] = text
         self.render_transcript()
@@ -619,6 +658,7 @@ class MainWindow(QMainWindow):
         if token is not self._ai_token:
             return
         self._ai_busy = False
+        self._manual_until = 0
         if error:
             self.auto.setChecked(False)
             self.answer += f"\n\n_Ошибка: {error}_"
@@ -666,16 +706,38 @@ class MainWindow(QMainWindow):
 
     def open_focus(self):
         if self.focus_window is None:
-            self.focus_window = QDialog(self)
+            self.focus_window = FocusWindow(self)
             self.focus_window.setWindowTitle("Konspekt · фокус")
             self.focus_window.resize(480, 560)
             layout = QVBoxLayout(self.focus_window)
-            layout.addWidget(QLabel("ПОДСКАЗКА / Ctrl+Shift+K"))
+            header = QHBoxLayout()
+            header.addWidget(QLabel("KONSPEKT · перетащи за верхний край"))
+            close = QPushButton("×")
+            close.setMaximumWidth(35)
+            close.clicked.connect(self.focus_window.close)
+            header.addWidget(close)
+            layout.addLayout(header)
+            self.focus_state = QLabel("Запись выключена")
+            layout.addWidget(self.focus_state)
             self.focus_view = QTextBrowser()
+            self.focus_view.setObjectName("focusAnswer")
             layout.addWidget(self.focus_view)
             pin = QCheckBox("Поверх остальных окон")
             pin.toggled.connect(self.pin_focus)
+            pin.setChecked(True)
             layout.addWidget(pin)
+            self.opacity_label = QLabel()
+            layout.addWidget(self.opacity_label)
+            self.opacity_slider = QSlider(Qt.Horizontal)
+            self.opacity_slider.setRange(10, 95)
+            self.opacity_slider.setValue(max(10, min(95, int(self.cfg["overlay_alpha"]))))
+            self.opacity_slider.valueChanged.connect(self.set_overlay_alpha)
+            self.opacity_slider.sliderReleased.connect(lambda: config.save(self.cfg))
+            layout.addWidget(self.opacity_slider)
+            stop = QPushButton("Остановить запись")
+            stop.clicked.connect(self.stop_record)
+            layout.addWidget(stop)
+            self.set_overlay_alpha(self.opacity_slider.value())
         self.focus_view.setMarkdown(self.answer or "Подсказка появится здесь после запроса.")
         self.focus_window.show()
         protect_window(int(self.focus_window.winId()), self.cfg["capture_protection"])
@@ -685,6 +747,19 @@ class MainWindow(QMainWindow):
         self.focus_window.setWindowFlag(Qt.WindowStaysOnTopHint, enabled)
         self.focus_window.show()
         protect_window(int(self.focus_window.winId()), self.cfg["capture_protection"])
+
+    def set_overlay_alpha(self, value):
+        value = max(10, min(95, int(value)))
+        self.cfg["overlay_alpha"] = value
+        self.opacity_label.setText(f"Плотность фона: {value}% · буквы остаются непрозрачными")
+        alpha = round(255 * value / 100)
+        self.focus_window.background_alpha = alpha
+        self.focus_window.update()
+        self.focus_window.setStyleSheet(
+            "QDialog { background: transparent; }"
+            "QLabel, QCheckBox, QTextBrowser, QSlider { background: transparent; color: white; }"
+            "QTextBrowser#focusAnswer { border: none; font-size: 14pt; padding: 8px; }"
+            "QPushButton { background: rgba(35,38,52,180); color: white; }")
 
     def load_demo(self):
         if self.recorder or self.lines or self._ai_busy or self.answer.strip():
@@ -795,6 +870,7 @@ class MainWindow(QMainWindow):
         self._record_generation += 1
         self._last_auto_line = 0
         self._auto_pending = False
+        self._auto_buffer = ""
         self._manual_until = 0
         self.clear_files()
         self.started_at = 0.0

@@ -8,6 +8,7 @@ CONFIG_PATH = APP_DIR / "config.json"
 NOTES_DIR = Path.home() / "Documents" / "Konspekt"
 
 DEFAULTS = {
+    "overlay_alpha": 25,
     "deepgram_key": "",
     "openrouter_key": "",
     "groq_key": "",
