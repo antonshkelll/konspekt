@@ -8,3 +8,6 @@ __pycache__/
 build.log
 *.log
 output/
+siwc/node_modules/
+siwc/node.exe
+siwc/node-bin/

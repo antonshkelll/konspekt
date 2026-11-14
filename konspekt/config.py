@@ -8,13 +8,14 @@ CONFIG_PATH = APP_DIR / "config.json"
 NOTES_DIR = Path.home() / "Documents" / "Konspekt"
 
 DEFAULTS = {
+    "chatgpt_model": "",
     "overlay_alpha": 25,
     "openai_key": "",
     "openai_model": "gpt-6-luna",
     "deepgram_key": "",
     "openrouter_key": "",
     "groq_key": "",
-    "llm_provider": "ollama",
+    "llm_provider": "chatgpt",
     "stt_provider": "deepgram",
     "deepgram_use_proxy": False,
     "deepseek_key": "",

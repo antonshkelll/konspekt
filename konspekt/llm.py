@@ -11,6 +11,8 @@ OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 def connection(cfg: dict) -> tuple[str, str, str, str]:
     provider = cfg["llm_provider"]
+    if provider == "chatgpt":
+        return "https://api.openai.com/v1", "", cfg["chatgpt_model"], "ChatGPT"
     if provider == "openai":
         return "https://api.openai.com/v1", cfg["openai_key"], cfg["openai_model"], "OpenAI"
     if provider == "deepseek":
@@ -71,6 +73,9 @@ def build_messages(transcript: str, context: str, question: str, *, compact=Fals
 def stream_answer(api_key: str, model: str, messages: list[dict], on_delta, cancel,
                   base_url="https://openrouter.ai/api/v1", service="OpenRouter", max_tokens=700) -> None:
     """Стримит ответ; on_delta(str) вызывается на каждый кусок текста."""
+    if service == "ChatGPT":
+        from . import chatgpt
+        return chatgpt.stream(model, messages, on_delta, cancel)
     headers = {
         "X-Title": "Konspekt",
     }

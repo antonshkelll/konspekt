@@ -9,7 +9,7 @@ def probe(cfg):
         url, key, model, service = llm.connection(cfg)
     except ValueError as exc:
         return {"ok": False, "message": str(exc)}
-    if service != "Ollama" and not key.strip():
+    if service not in ("Ollama", "ChatGPT") and not key.strip():
         return {"ok": False, "message": f"{service}: сначала укажи API-ключ."}
     started = time.monotonic()
     first = []

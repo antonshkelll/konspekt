@@ -10,6 +10,8 @@ if errorlevel 1 goto failed
 if errorlevel 1 goto failed
 .venv\Scripts\pyinstaller --noconfirm --clean Konspekt.spec
 if errorlevel 1 goto failed
+.venv\Scripts\python tools\package_auth_runtime.py dist\auth-runtime
+if errorlevel 1 goto failed
 echo.
 echo Готово: dist\Konspekt.exe
 exit /b 0

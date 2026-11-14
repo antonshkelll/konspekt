@@ -13,7 +13,7 @@ from zipfile import ZipFile
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import httpx
 from PySide6.QtWidgets import QApplication, QMessageBox
-from konspekt import account, config, llm, diagnostics
+from konspekt import account, config, llm, diagnostics, chatgpt
 from konspekt.context import read_context, compose_context
 from konspekt.app import MainWindow, SettingsDialog
 from konspekt.groq_stt import GroqSource
@@ -90,6 +90,25 @@ class ContextTests(unittest.TestCase):
 
 
 class LLMTests(unittest.TestCase):
+    def test_subscription_route_never_calls_api_key_transport(self):
+        cfg = dict(config.DEFAULTS, llm_provider="chatgpt", chatgpt_model="available-slug", openai_key="must-not-be-used")
+        url, key, model, service = llm.connection(cfg)
+        self.assertEqual(key, "")
+        with patch.object(chatgpt, "call", return_value={"ok":True}) as ipc, patch.object(llm.httpx, "stream") as paid:
+            llm.stream_answer(key, model, [{"role":"system","content":"instructions"},{"role":"user","content":"meeting"}], lambda _:None, lambda:False, url, service)
+            payload = ipc.call_args.args[0]
+            self.assertEqual(payload["instructions"], "instructions")
+            self.assertEqual(payload["input"], [{"role":"user","content":"meeting"}])
+            self.assertNotIn("max_output_tokens", payload)
+            self.assertNotIn("openai_key", payload)
+            paid.assert_not_called()
+
+    def test_subscription_failure_does_not_fallback(self):
+        with patch.object(chatgpt, "stream", side_effect=RuntimeError("sharing_not_enabled")), patch.object(llm.httpx, "stream") as paid:
+            with self.assertRaises(RuntimeError):
+                llm.stream_answer("", "model", [], lambda _:None, lambda:False, service="ChatGPT")
+            paid.assert_not_called()
+
     def test_openai_stream_wire_contract(self):
         cfg = dict(config.DEFAULTS, llm_provider="openai", openai_key="synthetic-key")
         url, key, model, service = llm.connection(cfg)
@@ -354,6 +373,18 @@ class WindowTests(unittest.TestCase):
         dlg.apply()
         self.assertEqual(dlg.cfg["llm_provider"], "openai")
         self.assertEqual(dlg.cfg["openai_key"], "test-key")
+        dlg.close()
+
+    def test_subscription_only_selects_discovered_models_after_consent(self):
+        with patch("konspekt.app.Recorder"), patch("konspekt.app.list_microphones", return_value=[]):
+            dlg = SettingsDialog(dict(config.DEFAULTS))
+        dlg.provider.setCurrentIndex(dlg.provider.findData("chatgpt"))
+        dlg.on_chatgpt_connected({"session":{"sharing":False},"models":[]})
+        self.assertIn("не разрешено", dlg.chatgpt_notice.text())
+        dlg.on_chatgpt_connected({"session":{"sharing":True},"models":[{"slug":"account-luna","displayName":"Luna"}]})
+        dlg.apply()
+        self.assertEqual(dlg.cfg["llm_provider"], "chatgpt")
+        self.assertEqual(dlg.cfg["chatgpt_model"], "account-luna")
         dlg.close()
 
 

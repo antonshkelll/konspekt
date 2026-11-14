@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (
     QSystemTrayIcon, QMenu, QScrollArea, QSlider,
 )
 
-from . import account, config, llm, diagnostics
+from . import account, config, llm, diagnostics, chatgpt
 from .capture import Recorder, list_microphones
 from .context import read_context, compose_context
 from .privacy import protect_window
@@ -58,6 +58,7 @@ class Bridge(QObject):
 
 
 class SettingsDialog(QDialog):
+    chatgpt_connected = Signal(object)
     checked = Signal(str)
     check_finished = Signal()
     def __init__(self, cfg: dict, parent=None):
@@ -77,7 +78,7 @@ class SettingsDialog(QDialog):
         outer.addWidget(area)
 
         self.provider = QComboBox()
-        for label, value in (("OpenAI API · отдельный API-баланс", "openai"), ("DeepSeek · платный API", "deepseek"), ("Groq · бесплатная квота", "groq"), ("Ollama · своя модель", "ollama"), ("OpenRouter", "openrouter")):
+        for label, value in (("ChatGPT · использовать свой план", "chatgpt"), ("OpenAI API · отдельный API-баланс", "openai"), ("DeepSeek · платный API", "deepseek"), ("Groq · бесплатная квота", "groq"), ("Ollama · своя модель", "ollama"), ("OpenRouter", "openrouter")):
             self.provider.addItem(label, value)
         self.provider.setCurrentIndex(max(0, self.provider.findData(cfg["llm_provider"])))
         self.stt_provider = QComboBox()
@@ -101,6 +102,19 @@ class SettingsDialog(QDialog):
         self.taskbar.setChecked(cfg["skip_taskbar"])
         form.addRow("Провайдер ответов", self.provider)
         form.addRow("Распознавание речи", self.stt_provider)
+        self.chatgpt_login = QPushButton("Continue with ChatGPT")
+        self.chatgpt_login.clicked.connect(self.sign_in_chatgpt)
+        self.chatgpt_model = QComboBox()
+        self.chatgpt_model.addItem(cfg["chatgpt_model"] or "Войди, чтобы загрузить доступные модели", cfg["chatgpt_model"])
+        self.chatgpt_notice = QLabel('Использование плана требует твоего разрешения при входе. <a href="https://chatgpt.com/settings/usage">Manage usage</a>')
+        self.chatgpt_notice.setOpenExternalLinks(True)
+        self.chatgpt_notice.setWordWrap(True)
+        form.addRow(self.chatgpt_login)
+        form.addRow("Модель плана ChatGPT", self.chatgpt_model)
+        form.addRow(self.chatgpt_notice)
+        self.chatgpt_connected.connect(self.on_chatgpt_connected)
+        self._auth_cancel = threading.Event()
+        self.finished.connect(lambda _: self._auth_cancel.set())
         form.addRow("Ключ OpenAI API", self.openai)
         form.addRow("Модель OpenAI", self.openai_model)
         form.addRow("Ключ DeepSeek", self.deepseek)
@@ -181,9 +195,47 @@ class SettingsDialog(QDialog):
                 form.setRowVisible(field, selected == provider or (field is self.groq and self.stt_provider.currentData() == "groq"))
             for field in (self.dg, self.stt, self.dg_proxy):
                 form.setRowVisible(field, self.stt_provider.currentData() == "deepgram")
+            for field in (self.chatgpt_login, self.chatgpt_model, self.chatgpt_notice):
+                form.setRowVisible(field, selected == "chatgpt")
         self.provider.currentIndexChanged.connect(refresh_fields)
         self.stt_provider.currentIndexChanged.connect(refresh_fields)
         refresh_fields()
+
+    def sign_in_chatgpt(self):
+        self.chatgpt_login.setEnabled(False)
+        self.chatgpt_notice.setText("Заверши вход и разрешение использования плана в открытом браузере. Не закрывай настройки до завершения.")
+        self._auth_cancel.clear()
+        def work():
+            try:
+                result = chatgpt.call({"op":"sign-in"}, cancel=self._auth_cancel.is_set, timeout=630)
+                self.chatgpt_connected.emit(result or {"error":"Вход отменён."})
+            except Exception as exc:
+                try:
+                    self.chatgpt_connected.emit({"error":str(exc) if isinstance(exc,RuntimeError) else type(exc).__name__})
+                except RuntimeError:
+                    pass
+        threading.Thread(target=work, daemon=True).start()
+
+    def on_chatgpt_connected(self, result):
+        self.chatgpt_login.setEnabled(True)
+        if result.get("error"):
+            self.chatgpt_notice.setText(result["error"])
+            return
+        session = result.get("session", {})
+        if not session.get("sharing"):
+            self.chatgpt_notice.setText("Вход выполнен, но использование плана не разрешено. Проверь разрешения в ChatGPT.")
+            return
+        previous = self.chatgpt_model.currentData()
+        self.chatgpt_model.clear()
+        models = result.get("models", [])
+        for model in models:
+            self.chatgpt_model.addItem(model["displayName"], model["slug"])
+        selected = self.chatgpt_model.findData(previous)
+        if selected < 0:
+            selected = next((i for i,m in enumerate(models) if "luna" in m["slug"].lower()), 0)
+        if models:
+            self.chatgpt_model.setCurrentIndex(selected)
+        self.chatgpt_notice.setText('Using ChatGPT plan · разрешение получено. Доступ и лимиты проверяются запросом. <a href="https://chatgpt.com/settings/usage">Manage usage</a>')
 
     def check_keys(self, live=False):
         if self._checking:
@@ -193,6 +245,7 @@ class SettingsDialog(QDialog):
         self.live_check.setEnabled(False)
         self.check_result.setText("Проверяю в фоне…" if not live else "Отправляю синтетический тест. Для платного API запрос тарифицируется…")
         snapshot = dict(self.cfg, llm_provider=self.provider.currentData(),
+                        chatgpt_model=self.chatgpt_model.currentData() or "",
                         openai_key=self.openai.text().strip(), openai_model=self.openai_model.text().strip(),
                         groq_key=self.groq.text().strip(), groq_model=self.groq_model.text().strip(),
                         deepseek_key=self.deepseek.text().strip(), deepseek_model=self.deepseek_model.text().strip(),
@@ -207,7 +260,10 @@ class SettingsDialog(QDialog):
                 else:
                     import httpx
                     url, key, _, service = llm.connection(snapshot)
-                    if service != "Ollama" and not key:
+                    if service == "ChatGPT":
+                        session = chatgpt.call({"op":"status"})["session"]
+                        lines.append("ChatGPT plan: разрешение получено. Проверь ответ отдельной кнопкой." if session.get("sharing") else "Выполни Continue with ChatGPT и разреши использование плана.")
+                    elif service != "Ollama" and not key:
                         lines.append(f"{service}: укажи API-ключ.")
                     else:
                         r = httpx.get(url + "/models", headers={"Authorization": f"Bearer {key}"} if key else {}, timeout=10)
@@ -225,6 +281,7 @@ class SettingsDialog(QDialog):
 
     def apply(self):
         self.cfg.update(
+            chatgpt_model=self.chatgpt_model.currentData() or "",
             openai_key=self.openai.text().strip(), openai_model=self.openai_model.text().strip() or config.DEFAULTS["openai_model"],
             llm_provider=self.provider.currentData(), stt_provider=self.stt_provider.currentData(),
             deepseek_key=self.deepseek.text().strip(), deepseek_model=self.deepseek_model.text().strip() or config.DEFAULTS["deepseek_model"],
@@ -477,11 +534,11 @@ class MainWindow(QMainWindow):
             sec = int(time.time() - self.started_at)
             self.clock.setText(f"{sec // 60:02d}:{sec % 60:02d}")
             now = time.monotonic()
-            interval = {"openai": 1, "deepseek": 1, "ollama": 1, "groq": 30}.get(self.cfg["llm_provider"], 15)
+            interval = {"chatgpt": 1, "openai": 1, "deepseek": 1, "ollama": 1, "groq": 30}.get(self.cfg["llm_provider"], 15)
             if (self.auto.isChecked() and not self._ai_busy and self.lines and self._auto_pending
                     and now >= self._manual_until and not self.interim
                     and now - self._last_auto >= interval
-                    and now - self._last_final >= (0.35 if self.cfg["llm_provider"] in ("openai", "deepseek", "ollama") else 1.5)):
+                    and now - self._last_final >= (0.35 if self.cfg["llm_provider"] in ("chatgpt", "openai", "deepseek", "ollama") else 1.5)):
                 batch = self._auto_buffer[:1800]
                 boundary = batch.rfind("\n")
                 if boundary >= 600:
@@ -623,7 +680,7 @@ class MainWindow(QMainWindow):
             self.auto.setChecked(False)
             self.status.setText(str(exc))
             return
-        if service != "Ollama" and not key:
+        if service not in ("Ollama", "ChatGPT") and not key:
             self.auto.setChecked(False)
             if automatic:
                 self.status.setText("Автоподсказки выключены: укажи ключ API в настройках.")
@@ -819,6 +876,8 @@ class MainWindow(QMainWindow):
     def profile_caption(self):
         try:
             _, key, model, service = llm.connection(self.cfg)
+            if service == "ChatGPT":
+                return f"Using ChatGPT plan · {model}" if model else "ChatGPT · выполни вход в настройках"
             return f"{service} · {model}" if key or service == "Ollama" else f"{service} · нужен API-ключ"
         except ValueError:
             return "Выбери провайдера в настройках"
@@ -925,4 +984,6 @@ def main():
     app.setStyleSheet(STYLE)
     win = MainWindow()
     win.show()
+    if win.cfg["llm_provider"] == "chatgpt" and not win.cfg["chatgpt_model"]:
+        QTimer.singleShot(0, win.open_settings)
     sys.exit(app.exec())
