@@ -81,6 +81,7 @@ class Source:
             self._ws = connect(
                 f"{DEEPGRAM_URL}?{urlencode(params)}",
                 additional_headers={"Authorization": f"Token {self.cfg['deepgram_key'].strip()}"},
+                proxy=True if self.cfg.get("deepgram_use_proxy", False) else None,
                 open_timeout=10,
             )
         except InvalidStatus as e:

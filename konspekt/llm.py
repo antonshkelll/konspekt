@@ -63,18 +63,25 @@ def build_messages(transcript: str, context: str, question: str, *, compact=Fals
 
 
 def stream_answer(api_key: str, model: str, messages: list[dict], on_delta, cancel,
-                  base_url="https://openrouter.ai/api/v1", service="OpenRouter") -> None:
+                  base_url="https://openrouter.ai/api/v1", service="OpenRouter", max_tokens=700) -> None:
     """Стримит ответ; on_delta(str) вызывается на каждый кусок текста."""
     headers = {
         "X-Title": "Konspekt",
     }
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
-    body = {"model": model, "messages": messages, "stream": True, "max_tokens": 700}
+    body = {"model": model, "messages": messages, "stream": True, "max_tokens": max_tokens}
     if service == "DeepSeek":
         body["thinking"] = {"type": "disabled"}
+    elif service == "Ollama":
+        body["reasoning_effort"] = "none"
+        if "deepseek-r1" in model.lower():
+            # R1 can require reasoning even when 'none' is requested; a tiny shared
+            # output budget otherwise ends before the answer starts.
+            body["max_tokens"] = max(max_tokens, 2048)
     received = False
-    with httpx.stream("POST", base_url.rstrip("/") + "/chat/completions", headers=headers, json=body, timeout=60) as r:
+    timeout = httpx.Timeout(180 if service == "Ollama" else 60, connect=10)
+    with httpx.stream("POST", base_url.rstrip("/") + "/chat/completions", headers=headers, json=body, timeout=timeout) as r:
         if r.status_code != 200:
             r.read()
             if r.status_code in (401, 402, 403, 429):

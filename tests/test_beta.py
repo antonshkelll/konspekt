@@ -13,13 +13,23 @@ from zipfile import ZipFile
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import httpx
 from PySide6.QtWidgets import QApplication, QMessageBox
-from konspekt import config, llm
+from konspekt import account, config, llm
 from konspekt.context import read_context, compose_context
 from konspekt.app import MainWindow
 from konspekt.groq_stt import GroqSource
+from konspekt.capture import Source
+from unittest.mock import MagicMock
 
 
 class AudioTests(unittest.TestCase):
+    def test_deepgram_avoids_system_proxy_by_default(self):
+        for enabled in (False, True):
+            cfg = dict(config.DEFAULTS, deepgram_key="test", deepgram_use_proxy=enabled)
+            src = Source(MagicMock(), {"defaultSampleRate": 16000, "maxInputChannels": 1, "index": 0},
+                         "Я", cfg, lambda *a: None, lambda *a: None)
+            with patch("konspekt.capture.connect") as connect, patch("konspekt.capture.threading.Thread"):
+                src.start()
+                self.assertIs(connect.call_args.kwargs["proxy"], True if enabled else None)
     def test_stereo_final_fragment_is_flushed_as_mono_wav(self):
         out, status = [], []
         src = GroqSource(None, {"defaultSampleRate": 100, "maxInputChannels": 2},
@@ -80,6 +90,24 @@ class ContextTests(unittest.TestCase):
 
 
 class LLMTests(unittest.TestCase):
+    def test_deepseek_empty_balance_is_not_reported_as_ready(self):
+        with patch.object(account.httpx, "get", return_value=httpx.Response(200, json={"is_available": False})):
+            result = account.check_deepseek("test")
+        self.assertIn("недостаточно", result)
+
+    def test_local_r1_has_room_to_finish_reasoning(self):
+        with patch.object(llm.httpx, "stream") as stream:
+            response = stream.return_value.__enter__.return_value
+            response.status_code = 200
+            response.iter_lines.return_value = ['data: {"choices":[{"delta":{"content":"ok"}}]}', 'data: [DONE]']
+            llm.stream_answer("", "deepseek-r1:1.5b", [], lambda _: None, lambda: False,
+                              "http://127.0.0.1:11434/v1", "Ollama", max_tokens=100)
+            body = stream.call_args.kwargs["json"]
+            self.assertEqual(body["reasoning_effort"], "none")
+            self.assertEqual(body["max_tokens"], 2048)
+            self.assertNotIn("Authorization", stream.call_args.kwargs["headers"])
+            self.assertEqual(stream.call_args.kwargs["timeout"].read, 180)
+
     def run_stream(self, data, status=200):
         out = []
         def stream(*args, **kwargs):
@@ -107,7 +135,7 @@ class LLMTests(unittest.TestCase):
             llm.connection(cfg)
 
     def test_deepseek_non_thinking_stream_request(self):
-        cfg = dict(config.DEFAULTS, deepseek_key="test-key")
+        cfg = dict(config.DEFAULTS, llm_provider="deepseek", deepseek_key="test-key")
         url, key, model, service = llm.connection(cfg)
         self.assertEqual((url, service, model), ("https://api.deepseek.com", "DeepSeek", "deepseek-flash"))
         out = []
@@ -178,8 +206,9 @@ class WindowTests(unittest.TestCase):
 
     def test_background_answer_reaches_ui_with_attached_context(self):
         self.win.cfg["deepseek_key"] = "test"
+        self.win.cfg["llm_provider"] = "deepseek"
         self.win.attachments["brief.md"] = "Бюджет 100"
-        def answer(key, model, messages, on_delta, cancel, url, service):
+        def answer(key, model, messages, on_delta, cancel, url, service, **kwargs):
             self.assertIn("brief.md", messages[1]["content"])
             self.assertEqual(service, "DeepSeek")
             on_delta("Готовый ответ")

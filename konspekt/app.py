@@ -107,6 +107,8 @@ class SettingsDialog(QDialog):
         self.model = QLineEdit(cfg["llm_model"])
         self.fast = QLineEdit(cfg["fast_model"])
         self.stt = QLineEdit(cfg["stt_model"])
+        self.dg_proxy = QCheckBox("Использовать системный прокси для Deepgram")
+        self.dg_proxy.setChecked(cfg["deepgram_use_proxy"])
 
         self.mic = QComboBox()
         self.mic.addItem("Микрофон по умолчанию", None)
@@ -131,12 +133,13 @@ class SettingsDialog(QDialog):
         form.addRow("Основная модель", self.model)
         form.addRow("Быстрая модель", self.fast)
         form.addRow("Модель речи", self.stt)
+        form.addRow(self.dg_proxy)
         form.addRow("Микрофон", self.mic)
         form.addRow(self.system)
         form.addRow(self.hint)
         form.addRow(self.protection)
         form.addRow(self.taskbar)
-        note = QLabel("Groq: речь и контекст уходят в облако. Квоты ограничены.\nЗащиту окна проверь в своей программе созвонов.\nКлючи сохраняются локально в config.json; не публикуй его.")
+        note = QLabel("Речь отправляется провайдеру распознавания, контекст — провайдеру ответов.\nЗащиту окна проверь в своей программе созвонов.\nКлючи сохраняются локально в config.json; не публикуй его.")
         note.setWordWrap(True)
         form.addRow(note)
         check = QPushButton("Проверить API")
@@ -157,7 +160,7 @@ class SettingsDialog(QDialog):
                                     (self.ollama_url, "ollama"), (self.ollama_model, "ollama"),
                                     (self.orr, "openrouter"), (self.model, "openrouter"), (self.fast, "openrouter")):
                 form.setRowVisible(field, selected == provider or (field is self.groq and self.stt_provider.currentData() == "groq"))
-            for field in (self.dg, self.stt):
+            for field in (self.dg, self.stt, self.dg_proxy):
                 form.setRowVisible(field, self.stt_provider.currentData() == "deepgram")
         self.provider.currentIndexChanged.connect(refresh_fields)
         self.stt_provider.currentIndexChanged.connect(refresh_fields)
@@ -181,6 +184,8 @@ class SettingsDialog(QDialog):
         except Exception:
             lines.append("API ответов недоступен: проверь адрес и соединение.")
         checks = []
+        if self.provider.currentData() == "deepseek":
+            checks.append((account.check_deepseek, self.deepseek.text().strip()))
         if self.stt_provider.currentData() == "deepgram":
             checks.append((account.check_deepgram, self.dg.text().strip()))
         if self.provider.currentData() == "openrouter":
@@ -205,6 +210,7 @@ class SettingsDialog(QDialog):
             llm_model=self.model.text().strip() or config.DEFAULTS["llm_model"],
             fast_model=self.fast.text().strip() or config.DEFAULTS["fast_model"],
             stt_model=self.stt.text().strip() or config.DEFAULTS["stt_model"],
+            deepgram_use_proxy=self.dg_proxy.isChecked(),
             mic_device=self.mic.currentData(),
             capture_system=self.system.isChecked(),
             consent_hint=self.hint.isChecked(),
@@ -328,8 +334,8 @@ class MainWindow(QMainWindow):
         self.files_label = QLabel("Файлы не прикреплены")
         self.files_label.setWordWrap(True)
         rl.addWidget(self.files_label)
-        self.auto = QCheckBox("Автоподсказки · DeepSeek после реплики собеседника")
-        self.auto.setToolTip("DeepSeek: после короткой паузы. Groq: раз в 30 с. Ollama/OpenRouter: раз в 15 с. Автозапросы расходуют API-баланс.")
+        self.auto = QCheckBox("Автоподсказки после реплики собеседника")
+        self.auto.setToolTip("Ollama / DeepSeek: после короткой паузы. Groq: раз в 30 с. OpenRouter: раз в 15 с. Облачные автозапросы расходуют API-баланс.")
         rl.addWidget(self.auto)
 
         presets = QHBoxLayout()
@@ -354,7 +360,7 @@ class MainWindow(QMainWindow):
         self.ai_view.setOpenExternalLinks(True)
         self.ai_view.setPlaceholderText("Здесь появятся ответы ИИ.")
         rl.addWidget(self.ai_view)
-        self.ai_timing = QLabel("DeepSeek: ответ по мере генерации · без режима размышлений")
+        self.ai_timing = QLabel("Ответ по мере генерации · скорость зависит от выбранной модели")
         self.ai_timing.setObjectName("muted")
         rl.addWidget(self.ai_timing)
 
@@ -369,12 +375,12 @@ class MainWindow(QMainWindow):
             sec = int(time.time() - self.started_at)
             self.clock.setText(f"{sec // 60:02d}:{sec % 60:02d}")
             now = time.monotonic()
-            interval = {"deepseek": 1, "groq": 30}.get(self.cfg["llm_provider"], 15)
+            interval = {"deepseek": 1, "ollama": 1, "groq": 30}.get(self.cfg["llm_provider"], 15)
             if (self.auto.isChecked() and not self._ai_busy and self.lines and self._auto_pending
                     and now >= self._manual_until and not self.interim
                     and len(self.lines) > self._last_auto_line
                     and now - self._last_auto >= interval
-                    and now - self._last_final >= (0.35 if self.cfg["llm_provider"] == "deepseek" else 1.5)):
+                    and now - self._last_final >= (0.35 if self.cfg["llm_provider"] in ("deepseek", "ollama") else 1.5)):
                 self._auto_pending = False
                 self._last_auto = now
                 self._last_auto_line = len(self.lines)
@@ -534,7 +540,7 @@ class MainWindow(QMainWindow):
             try:
                 llm.stream_answer(key, model, messages,
                                   lambda d: None if cancelled() else self.bridge.ai_delta.emit(token, d),
-                                  cancelled, url, service)
+                                  cancelled, url, service, max_tokens=180 if automatic else 500)
                 if not cancelled():
                     self.bridge.ai_done.emit(token, "")
             except Exception as e:  # noqa: BLE001

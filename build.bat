@@ -8,11 +8,7 @@ if errorlevel 1 goto failed
 if errorlevel 1 goto failed
 .venv\Scripts\python tools\make_icon.py
 if errorlevel 1 goto failed
-.venv\Scripts\pyinstaller --noconfirm --clean --onefile --windowed ^
-  --name Konspekt --icon assets\icon.ico ^
-  --add-data "assets\icon.ico;assets" ^
-  --exclude-module PySide6.QtWebEngineCore --exclude-module PySide6.Qt3DCore ^
-  run.py
+.venv\Scripts\pyinstaller --noconfirm --clean Konspekt.spec
 if errorlevel 1 goto failed
 echo.
 echo Готово: dist\Konspekt.exe
